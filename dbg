@@ -1,0 +1,3 @@
+skip file Stg.h
+skip file rec.h
+skip file var.h
