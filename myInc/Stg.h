@@ -13,12 +13,16 @@
 #include "../../F_dev/X/F.h"
 
 namespace NStg {
-   
+
 using namespace NRec;
 
 //types:
 typedef const char cch;
 typedef unsigned long long ull;
+//
+#define Ksz 128         // key-size
+#define ks_sz 128       // key-ses-size
+#define ss_sz 128       // storage-ses-size
 
 enum Sew_tp {
 	FATAL = 1, USER, INNER, WRN
@@ -71,7 +75,102 @@ public:
 	
 };
 
-str* srv_cb(str &sin, void *ctx);
+void srv_cb(struct evhttp_request *req, SBUF &bfin, SBUF &bfout, void *ctx);
+
+class Stg;
+struct Srq {
+	/*
+	 *   [strict]
+	 * 
+	 *   Srq-sruct:   xx=xx%xx=xx%....  sep -> % now
+	 *    
+	 *   ------------------------------------- [K->S]
+	 *    
+	 *   1 type:      tp=s
+	 *   2 operation: op=set | get | (adm/sadm op)          
+	 *   3 k-sess:    ks=id|0
+	 *   3 s-sess:    ss=id|0
+	 *   ....
+	 *   
+	 *   data -> by op: 
+	 *   set: 
+	 *       key
+	 *   get:
+	 *       key
+	 *      
+	 *   ------------------------------------- [C->S]
+	 *   
+	 *   
+	 * 
+	 */
+	int stt = 0;
+	Stg *bs;
+	SBUF *bfin;
+	SBUF *bfout;
+	// order:
+	char tp[8] = { 0 };
+	char op[8] = { 0 };
+	char ks[ks_sz] = { 0 };
+	char ss[ss_sz] = { 0 };
+	char key[Ksz] = { 0 };
+
+	Srq(Stg *_bs, SBUF *_bfin, SBUF *_bfout) :
+			bs(_bs), bfin(_bfin), bfout(_bfout) {
+	}
+	
+	bool prs() {
+		//
+		bfin->rnxt(tp, '%', 8);
+		//
+		if (is(tp, "tp=s")) {
+			bfin->rnxt(op, '%', 8);
+			//
+			if (is(op, "op=...")) {
+				int x, y;
+				x = bfin->rnxt(ks, '%', ks_sz);
+				y = bfin->rnxt(ss, '%', ss_sz);
+				//
+				if (x <= ks_sz && y <= ss_sz) {
+					//
+					bfin->rnxt(key, '=', 4);
+					//
+					if (is(key, "key")) {
+						bfin->rnxt(key, 0, Ksz);
+					}
+					//
+					return true;
+				}
+			}
+		}
+		// err-parser-case
+		bfout->wnxt("S:Srq-parsing-error !");
+		//
+		return false;
+	}
+	
+	bool is(char *s1, cch *s2, char x = '.') {
+		while (*s1 != 0) {
+			if (*s1 != *s2 && *s2 != x) return false;
+			s1++, s2++;
+		}
+		if (*s1 == *s2) return true;
+		return false;
+	}
+};
+
+struct Srs {
+	
+	int stt = 0;
+	Stg *bs;
+	Srq *srq;
+	SBUF *bf;
+	Rhnd h;
+
+	Srs(Stg *_bs, Srq *_krq, SBUF *_bf) :
+			bs(_bs), srq(_krq), bf(_bf) {
+	}
+	
+};
 
 class Stg {
 	
@@ -152,12 +251,42 @@ public:
 			
 			srv.set("-a 192.168.100.6 -p 8888"); //--prr
 			srv.set_ext_cb(srv_cb, this);
-			srv.listen();  
-						
+			srv.listen();
+			
 		} catch (SExcp &ex) {
 			err_solver();
 		}
 	}
+	
+	///////////////////////////////////////////////  work space
+	
+	Rhnd set(cch *id) {
+		
+		if (STT == PRC) {
+			
+			Rhnd h = R.new_rec(id);
+			
+			return h;
+		} else {
+			//[?]
+		}
+		
+		return Rhnd();
+	}
+	
+	Rhnd get(int grp, ull offs) {
+		
+		if (STT == PRC) {
+			
+			Rhnd h = R.get_rec(grp, offs);
+			
+		} else {
+			//[?]
+		}
+		
+		return Rhnd();
+	}
+	////////////////////////////////////////////////////////////
 	
 	void err_solver() {
 		
@@ -171,22 +300,47 @@ Sew_cd Stg::EW_cd = Sew_cd(0);
 Sstt_cd Stg::STT = Sstt_cd(0);
 bool Stg::EW_PRN = 1;
 
-str* srv_cb(str &sin, void *ctx) {
+TMR t;
+
+void srv_cb(struct evhttp_request *req, SBUF &bfin, SBUF &bfout, void *ctx) {
 	
-	//double tm = 0;
-	//ull tot = 0;
-	
-	static str s = "---AAAAAAAAAA";
-	var x, y, z;
-	//-------------------   будет спец-парсер
-//	x = var(sin).split('%');	////   var-error if sin empty !!!!! 
-//	y = var(x[0]).split('=');
-//	z = var(x[1]).split('=');
-	var(sin).prnt();
-	//-------------------
+	Stg *S = (Stg*) ctx;
+	Srq srq(S, &bfin, &bfout);
+	Srs srs(S, &srq, &bfout);
+	// ---- timer-st
+	t.set("S-part-prc");
 	//
+	bfin.prnt(); /// dbg
 	//
-	return &s;
+	if (srq.prs()) {
+		
+		if (srq.is(srq.op, "op=set")) {
+			//
+			t.set("set");
+			//
+			srs.h = S->set(srq.key);
+			//------------------------ tmp
+			bfout.wnxt("S:set -> ");
+			if (srs.h) bfout.wnxt("[ok] ");
+			else bfout.wnxt("[err] ");
+			//----------------------------
+		} else if (srq.is(srq.op, "op=get")) {
+			
+			bfout.wnxt("S:op=get");
+			
+		} else if (srq.is(srq.op, "op=rem")) {
+			
+			bfout.wnxt("S:op=rem");
+			
+		} else {
+			bfout.wnxt("S:bad [op]");
+		}
+	}
+	// ------------------------ timer-end
+	double tm = t.get("S-part-prc");
+	bfout.wnxt("\nS:[->S->K] elapsed: ");
+	bfout.wnxt(std::to_string(tm).data());
+	//------------------------------------
 }
 
 }
